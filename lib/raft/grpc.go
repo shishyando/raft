@@ -15,14 +15,14 @@ import (
 
 const grpcTimeout time.Duration = time.Millisecond * time.Duration(5000)
 
-func RunRaftServer(id int, nodes []string, port uint) *RaftServer {
+func RunRaftServer(id int, raftAddrs []string, httpAddrs []string, raftPort uint) *RaftServer {
 	server := &RaftServer{
-		results:    make(map[LogId]*chan QueryResponse),
-		shouldRead: make(map[LogId]bool),
+		results: make(map[int]*chan ApplyOpResult),
 
-		id:    id,
-		state: FOLLOWER,
-		nodes: nodes,
+		id:        id,
+		state:     FOLLOWER,
+		raftNodes: raftAddrs,
+		httpNodes: httpAddrs,
 
 		currentTerm: 0,
 		votedFor:    -1,
@@ -30,10 +30,10 @@ func RunRaftServer(id int, nodes []string, port uint) *RaftServer {
 		commitIndex: -1,
 		lastApplied: -1,
 
-		nextIndex:  make(map[int]int64, len(nodes)),
-		matchIndex: make(map[int]int64, len(nodes)),
+		nextIndex:  make(map[int]int64, len(raftAddrs)),
+		matchIndex: make(map[int]int64, len(raftAddrs)),
 	}
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", raftPort))
 
 	if err != nil {
 		log.Fatal().Err(err).Msg("RunRaftServer failed")
@@ -41,9 +41,9 @@ func RunRaftServer(id int, nodes []string, port uint) *RaftServer {
 
 	grpcServer := grpc.NewServer()
 	pb.RegisterRaftServer(grpcServer, server)
-	log.Info().Uint("Port", port).Strs("Nodes", nodes).Msg("Running Raft grpc server")
+	log.Info().Uint("Port", raftPort).Strs("Nodes", raftAddrs).Msg("Running Raft grpc server")
 
-	server.resetElectionTimer()
+	server.safeResetElectionTimer()
 	go grpcServer.Serve(lis)
 	return server
 }

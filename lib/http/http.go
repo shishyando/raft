@@ -1,134 +1,126 @@
-package http
+package rafthttp
 
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"strconv"
 
-	pb "shishraft/lib/proto/pb"
+	"shishraft/lib/helpers"
+	"shishraft/lib/proto/pb"
 	raft "shishraft/lib/raft"
 
-	"google.golang.org/protobuf/encoding/protojson"
+	"github.com/gorilla/mux"
+	"github.com/rs/zerolog/log"
 )
 
 type HttpServer struct {
 	raft *raft.RaftServer
 }
 
-type HttpResponse struct {
-	Err      string `json:"err,omitempty"`
-	Node     string `json:"node"`
-	LogIndex int    `json:"logIndex"`
-	LogTerm  int64  `json:"logTerm"`
-}
-
-type RedirectedReadRequest struct {
-	LogIndex int `json:"logIndex"`
-	LogTerm  int `json:"LogTerm"`
-}
-
 func NewRaftHttpServer(raft *raft.RaftServer) *HttpServer {
 	return &HttpServer{raft: raft}
 }
 
-func (s *HttpServer) OpHandler(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "unable to read body", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	// Decode the protobuf message
-	op := &pb.LogEntry{}
-	if err := protojson.Unmarshal(body, op); err != nil {
-		fmt.Printf("Failed to convert JSON to protobuf: %v\n", err)
-		return
-	}
-
-	switch op.OpType {
-	case pb.OpType_CREATE:
-		if r.Method != http.MethodPost || op.Value == nil {
-			http.Error(w, "post with value", http.StatusBadRequest)
-			return
-		}
-	case pb.OpType_READ:
-		if r.Method != http.MethodGet {
-			http.Error(w, "use get", http.StatusBadRequest)
-			return
-		}
-	case pb.OpType_UPDATE:
-		if r.Method != http.MethodPut || op.Value == nil {
-			http.Error(w, "use put with value", http.StatusBadRequest)
-			return
-		}
-	case pb.OpType_DELETE:
-		if r.Method != http.MethodDelete {
-			http.Error(w, "use delete", http.StatusBadRequest)
-			return
-		}
-	case pb.OpType_CAS:
-		if r.Method != http.MethodPatch || op.Value == nil || op.ExpectedValue == nil {
-			http.Error(w, "use patch with both value and old value", http.StatusBadRequest)
-			return
-		}
-	default:
-		http.Error(w, "unsupported operation", http.StatusBadRequest)
-		return
-	}
-
-	res := s.raft.AppendOneEntryOnLeader(op)
-	if res == nil {
-		http.Error(w, "failed to replicate", http.StatusRequestTimeout)
-		return
-	}
-
-	httpResponse := &HttpResponse{}
-	httpResponse.LogIndex = res.LogId.Index
-	httpResponse.LogTerm = res.LogId.Term
-	httpResponse.Node = res.Node
-	switch res.Code {
-	case raft.RES_CODE_OK:
-		// reads are not processed here
-		if err := json.NewEncoder(w).Encode(httpResponse); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	case raft.RES_CODE_NOT_A_LEADER:
-		http.Error(w, fmt.Sprintf("leader: %s", res.Node), http.StatusBadRequest)
-		return
-	case raft.RES_CODE_REDIRECT_READ:
-		http.Error(w, fmt.Sprintf("read that: %d %d %s", httpResponse.LogIndex, httpResponse.LogTerm, res.Node), http.StatusFound)
-		return
-	default:
-		http.Error(w, "unexpected res code", http.StatusInternalServerError)
-		return
-	}
-
+type LogEntry struct {
+	Term          int64     `json:"term"`
+	OpType        pb.OpType `json:"opType"`
+	Key           string    `json:"key"`
+	Value         string    `json:"value,omitempty"`
+	ExpectedValue string    `json:"expectedValue,omitempty"`
 }
 
-func (s *HttpServer) RedirectReadHandler(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "unable to read body", http.StatusBadRequest)
+func (s *HttpServer) logResponse(entry LogEntry) raft.ApplyOpResult {
+	op := &pb.LogEntry{OpType: entry.OpType, Key: entry.Key, Value: &entry.Value, ExpectedValue: &entry.ExpectedValue}
+	log.Info().Str("op", helpers.DumpProtoMessageAsText(op)).Msg("http: got 1 new op")
+	return s.raft.AppendOneEntryOnLeader(op)
+}
+
+func processResult(res raft.ApplyOpResult, w http.ResponseWriter, r *http.Request) {
+	logApplyOpResult(res, "http: got result from raft")
+	if res.Err != nil {
+		http.Error(w, res.Err.Error(), http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
-	req := &RedirectedReadRequest{}
-	if err := json.Unmarshal(body, req); err != nil {
-		http.Error(w, fmt.Sprintf("failed to convert request to json struct: %v\n", err), http.StatusBadRequest)
+	if res.Redirect {
+		logApplyOpResult(res, "http: redirecting!")
+
+		newUrl := fmt.Sprintf("http://%s%s", res.Node, r.URL.Path)
+		if res.LogIndex >= 0 { // direct read by LogIndex
+			newUrl += fmt.Sprintf("/%d", res.LogIndex)
+		}
+		http.Redirect(w, r, newUrl, http.StatusTemporaryRedirect)
+		return
+	}
+	w.Write([]byte(res.Val))
+}
+
+func (s *HttpServer) CreateHandler(w http.ResponseWriter, r *http.Request) {
+	var entry LogEntry
+	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	entry.OpType = pb.OpType_CREATE
+	processResult(s.logResponse(entry), w, r)
+}
+
+func (s *HttpServer) ReadHandler(w http.ResponseWriter, r *http.Request) {
+	key := mux.Vars(r)["key"]
+	if key == "" {
+		http.Error(w, "Key is required", http.StatusBadRequest)
+		return
+	}
+	entry := LogEntry{OpType: pb.OpType_READ, Key: key}
+	processResult(s.logResponse(entry), w, r)
+}
+
+func (s *HttpServer) ReadByIdHandler(w http.ResponseWriter, r *http.Request) {
+	key := mux.Vars(r)["key"]
+	id, err := strconv.Atoi(mux.Vars(r)["logId"])
+	if key == "" || err != nil {
+		http.Error(w, "Key and valid logId required", http.StatusBadRequest)
 		return
 	}
 
-	val, err := s.raft.ReadFromReplica(raft.LogId{Index: req.LogIndex, Term: int64(req.LogTerm)})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	processResult(s.raft.DirectReadById(id), w, r)
+}
+
+func (s *HttpServer) UpdateHandler(w http.ResponseWriter, r *http.Request) {
+	var entry LogEntry
+	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	_, err = w.Write([]byte(val))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	entry.OpType = pb.OpType_UPDATE
+	processResult(s.logResponse(entry), w, r)
+}
+
+func (s *HttpServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
+	key := mux.Vars(r)["key"]
+	if key == "" {
+		http.Error(w, "Key is required", http.StatusBadRequest)
 		return
 	}
+
+	entry := LogEntry{OpType: pb.OpType_DELETE, Key: key}
+	processResult(s.logResponse(entry), w, r)
+}
+
+func (s *HttpServer) CasHandler(w http.ResponseWriter, r *http.Request) {
+	var entry LogEntry
+	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	entry.OpType = pb.OpType_CAS
+	processResult(s.logResponse(entry), w, r)
+}
+
+func logApplyOpResult(res raft.ApplyOpResult, msg string) {
+	errStr := ""
+	if res.Err != nil {
+		errStr = res.Err.Error()
+	}
+	log.Info().Str("addr", res.Node).Str("err", errStr).Int("index", res.LogIndex).Bool("redirect", res.Redirect).Str("val", res.Val).Msg(msg)
 }
