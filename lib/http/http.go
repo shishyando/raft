@@ -37,14 +37,11 @@ func (s *HttpServer) logResponse(entry LogEntry) raft.ApplyOpResult {
 }
 
 func processResult(res raft.ApplyOpResult, w http.ResponseWriter, r *http.Request) {
-	logApplyOpResult(res, "http: got result from raft")
 	if res.Err != nil {
 		http.Error(w, res.Err.Error(), http.StatusBadRequest)
 		return
 	}
 	if res.Redirect {
-		logApplyOpResult(res, "http: redirecting!")
-
 		newUrl := fmt.Sprintf("http://%s%s", res.Node, r.URL.Path)
 		if res.LogIndex >= 0 { // direct read by LogIndex
 			newUrl += fmt.Sprintf("/%d", res.LogIndex)
@@ -115,12 +112,4 @@ func (s *HttpServer) CasHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	entry.OpType = pb.OpType_CAS
 	processResult(s.logResponse(entry), w, r)
-}
-
-func logApplyOpResult(res raft.ApplyOpResult, msg string) {
-	errStr := ""
-	if res.Err != nil {
-		errStr = res.Err.Error()
-	}
-	log.Info().Str("addr", res.Node).Str("err", errStr).Int("index", res.LogIndex).Bool("redirect", res.Redirect).Str("val", res.Val).Msg(msg)
 }

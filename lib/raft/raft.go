@@ -91,12 +91,10 @@ func (s *RaftServer) quorum(acks int) bool {
 func (s *RaftServer) safeCreateResChan(id int) *chan ApplyOpResult {
 	chptr, exists := s.results[id]
 	if exists {
-		log.Info().Int("opIndex", id).Str("chptr", fmt.Sprintf("%p", chptr)).Msg("safeCreateResChan: chan already created")
 		return chptr
 	}
 	ch := make(chan ApplyOpResult, 1)
 	s.results[id] = &ch
-	log.Info().Int("opIndex", id).Str("chptr", fmt.Sprintf("%p", &ch)).Msg("safeCreateResChan: new chan created")
 	return &ch
 }
 
@@ -146,7 +144,7 @@ func (s *RaftServer) elect() {
 
 			res, err := sendVoteRequest(s.raftNodes[i], req)
 			if err != nil {
-				log.Warn().Err(err).Str("Node", s.raftNodes[i]).Msg("Failed to send vote request, will retry on next heartbeat")
+				log.Warn().Err(err).Str("Node", s.raftNodes[i]).Msg("failed to send vote request, will retry on next elect if needed")
 				return
 			}
 
@@ -198,7 +196,7 @@ func (s *RaftServer) RequestVote(ctx context.Context, req *pb.VoteRequest) (*pb.
 		// should not grant the vote yet
 	} else if req.Term < s.currentTerm { // make him step down
 		response := &pb.VoteResponse{Term: s.currentTerm, Granted: false}
-		log.Warn().Str("response", helpers.DumpProtoMessageAsText(response)).Msg("Make him step down")
+		log.Warn().Str("response", helpers.DumpProtoMessageAsText(response)).Msg("make him step down")
 		return response, nil
 	}
 
@@ -212,13 +210,13 @@ func (s *RaftServer) RequestVote(ctx context.Context, req *pb.VoteRequest) (*pb.
 	voteNotExhausted := s.votedFor == -1 || s.votedFor == int(req.CandidateId)
 	candidateLogIsUpToDate := myLastLogTerm < req.LastLogTerm || (req.LastLogTerm == myLastLogTerm && myLastLogIndex <= req.LastLogIndex)
 	if !candidateLogIsUpToDate {
-		log.Error().Int64("myLastLogTerm", myLastLogTerm).Int64("myLastLogIndex", myLastLogIndex).Str("req", helpers.DumpProtoMessageAsText(req))
+		log.Debug().Int64("myLastLogTerm", myLastLogTerm).Int64("myLastLogIndex", myLastLogIndex).Str("req", helpers.DumpProtoMessageAsText(req)).Msg("stale candidate log")
 	}
 	if voteNotExhausted && candidateLogIsUpToDate { // worthy
 		s.safeFollow(req.Term)
 		s.votedFor = int(req.CandidateId)
 		response := &pb.VoteResponse{Term: s.currentTerm, Granted: true}
-		log.Debug().Str("response", helpers.DumpProtoMessageAsText(response)).Msg("Worthy")
+		log.Debug().Str("response", helpers.DumpProtoMessageAsText(response)).Msg("worthy")
 		return response, nil
 	}
 
@@ -268,8 +266,8 @@ func (s *RaftServer) heartBeat() {
 
 				res, err := sendAppendEntriesRequest(s.raftNodes[i], req)
 				if err != nil {
-					log.Error().Str("Node", s.raftNodes[i]).Err(err).Msg("Leader heartbeat failed")
-					continue // retry
+					log.Debug().Str("Node", s.raftNodes[i]).Err(err).Msg("failed to send heartbeat to follower")
+					return // retry next heartbeat
 				}
 				log.Debug().Str("response", helpers.DumpProtoMessageAsText(res)).Msg("got AppendEntries response")
 
@@ -287,7 +285,7 @@ func (s *RaftServer) heartBeat() {
 					return // stepped down
 				}
 				// log inconsistency, should retry with greater op suffix
-				log.Debug().Str("Node", s.raftNodes[i]).Msg("Failed to propogate entries because of log inconsistency")
+				log.Debug().Str("Node", s.raftNodes[i]).Msg("failed to propogate entries because of log inconsistency")
 				s.nextIndex[i] = nextIndex - 1
 				// retry
 			}
@@ -302,7 +300,7 @@ func (s *RaftServer) heartBeat() {
 func (s *RaftServer) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequest) (*pb.AppendEntriesResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	log.Debug().Str("req", helpers.DumpProtoMessageAsText(req)).Msg("AppendEntries")
+	log.Debug().Str("req", helpers.DumpProtoMessageAsText(req)).Msg("appendEntries")
 
 	if s.currentTerm > req.Term {
 		log.Warn().Int("current term", int(s.currentTerm)).Str("Request", helpers.DumpProtoMessageAsText(req)).Msg("fake leader that should step down")
@@ -320,7 +318,7 @@ func (s *RaftServer) AppendEntries(ctx context.Context, req *pb.AppendEntriesReq
 	if len(s.log) <= int(req.PrevLogIndex) || // log inconsistency
 		(req.PrevLogIndex >= 0 && s.log[req.PrevLogIndex].Term != req.PrevLogTerm) { // log inconsistency
 
-		log.Debug().Bool("logsize inconsistency", len(s.log) <= int(req.PrevLogIndex)).Bool("logterm inconsistency", req.PrevLogIndex >= 0 && s.log[req.PrevLogIndex].Term != req.PrevLogTerm).Str("Request", helpers.DumpProtoMessageAsText(req)).Msg("AppendEntries failed")
+		log.Debug().Bool("logsize inconsistency", len(s.log) <= int(req.PrevLogIndex)).Bool("logterm inconsistency", req.PrevLogIndex >= 0 && s.log[req.PrevLogIndex].Term != req.PrevLogTerm).Str("Request", helpers.DumpProtoMessageAsText(req)).Msg("appendEntries failed")
 		return &pb.AppendEntriesResponse{
 			Term:    s.currentTerm,
 			Success: false,
@@ -344,7 +342,7 @@ func (s *RaftServer) AppendEntries(ctx context.Context, req *pb.AppendEntriesReq
 		log.Debug().Int64("commit index", s.commitIndex).Int64("applied", s.lastApplied).Msg("ops applied!")
 	}
 
-	log.Debug().Msg("AppendEntries success")
+	log.Debug().Msg("appendEntries success")
 	return &pb.AppendEntriesResponse{
 		Term:    s.currentTerm,
 		Success: true,
@@ -362,14 +360,15 @@ func (s *RaftServer) safeRecalcLeaderCommitIndex() bool {
 	// Descending
 	sort.Slice(values, func(i, j int) bool { return values[i] > values[j] })
 	n := len(values)
-	newCommitIndex := values[n/2+1] // the majority replicated this log entry
+	log.Debug().Ints64("sorted matchIndexes", values).Msg("calculating majority's match index")
+	newCommitIndex := values[n/2] // the majority replicated this log entry
 	log.Debug().Int64("new commit index", newCommitIndex).Int64("current commit index", s.commitIndex).Int("len(log)", len(s.log)).Int64("current term", s.currentTerm).Msg("try to update commit index")
 	if len(s.log) > int(newCommitIndex) && newCommitIndex >= 0 {
 		log.Debug().Int64("new commit index log term", s.log[newCommitIndex].Term).Msg("comparing terms...")
 	}
 	if newCommitIndex > s.commitIndex && len(s.log) > int(newCommitIndex) && s.log[newCommitIndex].Term == s.currentTerm {
 		s.commitIndex = newCommitIndex
-		log.Debug().Msg("Updated commit index")
+		log.Debug().Msg("updated commit index")
 		return true
 	}
 	log.Debug().Msg("commit index up to date")
@@ -382,7 +381,7 @@ func (s *RaftServer) safeApplyOps() {
 	for i, op := range s.log[(s.lastApplied + 1):(s.commitIndex + 1)] {
 		opIndex := i + int(s.lastApplied) + 1
 		chPtr := s.safeCreateResChan(opIndex)
-		log.Info().Int("opIndex", opIndex).Str("op", helpers.DumpProtoMessageAsText(op)).Str("chPtr", fmt.Sprintf("%p", chPtr)).Msg("Applying op")
+		log.Info().Int("opIndex", opIndex).Str("op", helpers.DumpProtoMessageAsText(op)).Str("chPtr", fmt.Sprintf("%p", chPtr)).Msg("applying op")
 		val, err := storage.ApplyOp(op)
 		*chPtr <- ApplyOpResult{Val: val, Err: err, LogIndex: opIndex}
 	}
@@ -395,10 +394,10 @@ func (s *RaftServer) AppendOneEntryOnLeader(op *pb.LogEntry) ApplyOpResult {
 	if s.state != LEADER {
 		defer s.mu.Unlock()
 		if s.votedFor == -1 {
-			log.Warn().Str("op", helpers.DumpProtoMessageAsText(op)).Msg("No leader known")
+			log.Warn().Str("op", helpers.DumpProtoMessageAsText(op)).Msg("no leader known")
 			return ApplyOpResult{Err: fmt.Errorf("no leader known")}
 		}
-		log.Warn().Str("leader http", s.httpNodes[s.votedFor]).Str("op", helpers.DumpProtoMessageAsText(op)).Msg("Tried to append 1 entry on a follower")
+		log.Info().Str("leader http", s.httpNodes[s.votedFor]).Str("op", helpers.DumpProtoMessageAsText(op)).Msg("tried to append 1 entry on a follower")
 		return ApplyOpResult{LogIndex: -1, Redirect: true, Node: s.httpNodes[s.votedFor]}
 	}
 	op.Term = s.currentTerm
@@ -412,7 +411,6 @@ func (s *RaftServer) AppendOneEntryOnLeader(op *pb.LogEntry) ApplyOpResult {
 
 	// blocking until the operation is replicated
 	res := <-*resChPtr
-	logApplyOpResult(res, "leader got op result")
 	if op.OpType == pb.OpType_READ { // find a replica to answer instead of master
 		res.Redirect = true
 		res.Val = "" // save network banwidth, redirect reading to some up-to-date replica
@@ -426,25 +424,14 @@ func (s *RaftServer) AppendOneEntryOnLeader(op *pb.LogEntry) ApplyOpResult {
 		}
 	}
 
-	logApplyOpResult(res, "fixed result")
 	return res
 }
 
 func (s *RaftServer) DirectReadById(id int) ApplyOpResult {
 	s.mu.Lock()
-	log.Info().Int("id", id).Msg("DirectReadById")
+	log.Info().Int("id", id).Msg("direct read by id")
 	resChPtr := s.safeCreateResChan(id)
-	log.Info().Str("chPtr", fmt.Sprintf("%p", resChPtr)).Msg("DirectReadById waiting on ptr")
 	s.mu.Unlock()
 	res := <-*resChPtr
-	logApplyOpResult(res, "DirectReadById")
 	return res
-}
-
-func logApplyOpResult(res ApplyOpResult, msg string) {
-	errStr := ""
-	if res.Err != nil {
-		errStr = res.Err.Error()
-	}
-	log.Info().Str("addr", res.Node).Str("err", errStr).Int("index", res.LogIndex).Bool("redirect", res.Redirect).Str("val", res.Val).Msg(msg)
 }
