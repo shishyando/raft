@@ -64,6 +64,7 @@ type RaftServer struct {
 	mu sync.Mutex
 }
 
+// should be called under lock
 func (s *RaftServer) safeResetElectionTimer() {
 	if s.electionTimer != nil {
 		s.electionTimer.Stop()
@@ -349,6 +350,7 @@ func (s *RaftServer) AppendEntries(ctx context.Context, req *pb.AppendEntriesReq
 	}, nil
 }
 
+// should be called under lock
 func (s *RaftServer) safeRecalcLeaderCommitIndex() bool {
 
 	// commitIndex = majority(matchIndex) if term[thatLog] == currentTerm
