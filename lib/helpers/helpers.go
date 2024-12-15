@@ -18,7 +18,6 @@ func DumpProtoMessageAsText(msg proto.Message) string {
 	return string(textBytes)
 }
 
-
 func GetRaftPort(id int, basePort uint) uint {
 	return basePort + 2*uint(id)
 }
@@ -73,6 +72,6 @@ func SetupLogger(id int, local bool, debug bool, colorById bool) {
 			}
 		}
 
-		log.Logger = zerolog.New(output).With().Int("logger", id).Timestamp().Logger()
+		log.Logger = zerolog.New(output).With().Timestamp().Logger()
 	}
 }

@@ -36,7 +36,8 @@ func main() {
 
 	// run raft grpc
 	raftAddrs, httpAddrs := helpers.GetRaftAndHttpAddrs(addrs, basePort)
-	raftServer := raft.RunRaftServer(id, raftAddrs, httpAddrs, helpers.GetRaftPort(id, basePort))
+	raftServer := raft.NewRaftServer(id, raftAddrs, httpAddrs)
+	go raftServer.RunRaftServer(helpers.GetRaftPort(id, basePort))
 
 	// run http server
 	httpServer := rafthttp.NewRaftHttpServer(raftServer)

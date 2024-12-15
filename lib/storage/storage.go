@@ -10,14 +10,20 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var storage sync.Map
+type Storage struct {
+	kv sync.Map
+}
 
-func ApplyOp(op *pb.LogEntry) (string, error) {
+func NewStorage() *Storage {
+	return &Storage{kv: sync.Map{}}
+}
+
+func (s *Storage) ApplyOp(op *pb.LogEntry) (string, error) {
 	switch op.OpType {
 	case pb.OpType_READ:
 		key := op.Key
 		log.Info().Str("Get", key).Msg("storage: READ")
-		val, was := storage.Load(key)
+		val, was := s.kv.Load(key)
 		if !was {
 			err := fmt.Errorf("no resource at key `%s`", key)
 			log.Warn().Err(err).Msg("storage: error")
@@ -27,7 +33,7 @@ func ApplyOp(op *pb.LogEntry) (string, error) {
 	case pb.OpType_CREATE:
 		log.Info().Str("Op", helpers.DumpProtoMessageAsText(op)).Msg("storage: CREATE")
 
-		_, was := storage.LoadOrStore(op.Key, *op.Value)
+		_, was := s.kv.LoadOrStore(op.Key, *op.Value)
 		if was {
 			err := fmt.Errorf("resource at key `%s` already created", op.Key)
 			log.Warn().Err(err).Msg("storage: error")
@@ -42,17 +48,17 @@ func ApplyOp(op *pb.LogEntry) (string, error) {
 			log.Warn().Err(err).Msg("storage: error")
 			return "", err
 		}
-		_, was := storage.Load(op.Key)
+		_, was := s.kv.Load(op.Key)
 		if !was {
 			err := fmt.Errorf("no resource at key `%s`", op.Key)
 			log.Warn().Err(err).Msg("storage: error")
 			return "", err
 		}
-		storage.Store(op.Key, *op.Value)
+		s.kv.Store(op.Key, *op.Value)
 		return "", nil
 	case pb.OpType_DELETE:
 		log.Info().Str("Op", helpers.DumpProtoMessageAsText(op)).Msg("storage: DELETE")
-		_, was := storage.LoadAndDelete(op.Key)
+		_, was := s.kv.LoadAndDelete(op.Key)
 		if !was {
 			err := fmt.Errorf("no resource at key `%s`", op.Key)
 			log.Warn().Err(err).Msg("storage: error")
@@ -66,7 +72,7 @@ func ApplyOp(op *pb.LogEntry) (string, error) {
 			log.Warn().Err(err).Msg("storage: error")
 			return "", err
 		}
-		swapped := storage.CompareAndSwap(op.Key, *op.ExpectedValue, *op.Value)
+		swapped := s.kv.CompareAndSwap(op.Key, *op.ExpectedValue, *op.Value)
 		if !swapped {
 			err := fmt.Errorf("unexpected value for CAS for key `%s`", op.Key)
 			log.Warn().Err(err).Msg("storage: error")
